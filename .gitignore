@@ -1,0 +1,9 @@
+# NUNCA commitear credenciales ni claves
+*.pem
+*.key
+serviceAccount*.json
+firebase*.json
+.env
+.env.*
+venv/
+__pycache__/
