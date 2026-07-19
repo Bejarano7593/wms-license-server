@@ -49,9 +49,9 @@ def _startup():
     _sign_key = _load_sign_key()
 
 
-@app.get("/health")
-def health():
-    return {"ok": True}
+ @app.api_route("/health", methods=["GET", "HEAD"])
+  def health():
+      return {"ok": True}
 
 
 @app.post("/license")
