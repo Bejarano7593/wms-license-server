@@ -35,8 +35,8 @@ def _startup():
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
-  def health():
-      return {"ok": True}
+def health():
+    return {"ok": True}
 
 @app.post("/license")
 async def license_endpoint(request: Request):
