@@ -1,19 +1,4 @@
 # server/app.py
-"""
-Servidor FastAPI standalone de validación de licencias — OMA WMS (P0-1).
-
-Reemplaza el uso del Admin SDK EN EL CLIENTE. El service account vive solo acá,
-como secreto del host (variable de entorno FIREBASE_SERVICE_ACCOUNT), nunca en
-el .exe ni en el repo. Corre en cualquier host con free tier (Render, Deno
-Deploy con python, Fly, Railway, etc.).
-
-Variables de entorno requeridas:
-  FIREBASE_SERVICE_ACCOUNT        JSON del service account (una sola línea)
-  LICENSE_SIGNING_PRIVATE_KEY     base64 del PEM Ed25519 (de generate_keys.py)
-  LICENSE_API_KEY                 clave compartida anti-abuso
-
-Correr local:  uvicorn app:app --port 8080
-"""
 import os
 import json
 import base64
