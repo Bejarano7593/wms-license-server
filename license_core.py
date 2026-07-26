@@ -21,6 +21,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 COLLECTION = "licenses"
 DEFAULT_MAX_TRANSFERS = 1
 
+# TIER1 #6: TTL del ticket de licencia firmado que el cliente persiste y el gate
+# re-verifica offline en cada arranque. 72h = re-verificación online cada 3 días.
+TICKET_TTL_HOURS = 72
+
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -58,6 +62,53 @@ def canonical(payload: dict) -> bytes:
 def signed_body(payload: dict, sign_key: Ed25519PrivateKey) -> dict:
     signature = sign_key.sign(canonical(payload))
     return {"payload": payload, "signature": base64.b64encode(signature).decode("ascii")}
+
+
+# ── Ticket de licencia firmado (TIER1 #6) ───────────────────────────────
+
+def _ticket_license_ok(lic: dict, hardware_id: str) -> bool:
+    """Validación conservadora para decidir si EMITIR un ticket offline. Trabaja
+    sobre datos ya sanitizados (fechas string); la expiración por fecha la
+    verifica el gate del cliente. Solo se emite ticket si la licencia no está
+    bloqueada/expirada y corresponde a este hardware."""
+    if not lic:
+        return False
+    if lic.get("estado") in ("bloqueado", "expirado"):
+        return False
+    hw_reg = normalize_hw(lic.get("hardware_id", ""))
+    if lic.get("activada") and hw_reg and hw_reg != normalize_hw(hardware_id):
+        return False  # activada en otro equipo → exigir online, sin ticket offline
+    return True
+
+
+def build_ticket(license_key: str, hardware_id: str, lic: dict,
+                 sign_key: Ed25519PrivateKey, ttl_hours: int = TICKET_TTL_HOURS):
+    """Construye y firma un ticket. Devuelve (ticket_payload, ticket_sig_b64)."""
+    now = datetime.utcnow()
+    payload = {
+        "license_key":      license_key,
+        "hardware_id":      hardware_id,
+        "tipo":             lic.get("tipo"),
+        "estado":           lic.get("estado"),
+        "fecha_expiracion": lic.get("fecha_expiracion"),
+        "issued_at":        now.isoformat() + "Z",
+        "expires_at":       (now + timedelta(hours=ttl_hours)).isoformat() + "Z",
+        "nonce":            base64.b64encode(os.urandom(12)).decode("ascii"),
+    }
+    sig = sign_key.sign(canonical(payload))
+    return payload, base64.b64encode(sig).decode("ascii")
+
+
+def _attach_ticket(body: dict, result: dict, sign_key: Ed25519PrivateKey):
+    """Adjunta un ticket firmado al result si la respuesta lleva una licencia
+    válida para el hardware de la request. No-op en caso contrario."""
+    lic = result.get("license")
+    hw = (body or {}).get("hardware_id", "")
+    key = (body or {}).get("license_key", "")
+    if lic and key and _ticket_license_ok(lic, hw):
+        ticket, ticket_sig = build_ticket(key, hw, lic, sign_key)
+        result["ticket"] = ticket
+        result["ticket_sig"] = ticket_sig
 
 
 # ── Lógica de validación (pura) ─────────────────────────────────────────
@@ -210,6 +261,15 @@ def handle(body: dict, db, sign_key: Ed25519PrivateKey,
     except Exception as e:
         return signed_body({"error": "server_error", "detail": str(e)}, sign_key), 500
 
+    # TIER1 #6: adjuntar ticket firmado si la licencia es válida para el hardware.
+    _attach_ticket(body, result, sign_key)
+
     result["_ts"] = datetime.utcnow().isoformat() + "Z"
     result["_nonce"] = base64.b64encode(os.urandom(12)).decode("ascii")
+    # Anti-replay: eco DENTRO del payload firmado del nonce que generó el
+    # cliente para ESTA request. El cliente rechaza la respuesta si no coincide,
+    # así una respuesta capturada y reproducida (que lleva el nonce de otra
+    # request) no verifica. Backward-compatible: un cliente viejo no manda
+    # client_nonce → None y simplemente no lo verifica.
+    result["_client_nonce"] = (body or {}).get("client_nonce")
     return signed_body(result, sign_key), 200
