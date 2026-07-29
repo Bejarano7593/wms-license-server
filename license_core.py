@@ -12,9 +12,9 @@ app.py (FastAPI) es un wrapper fino: carga credenciales/clave y delega en handle
 import os
 import json
 import base64
-import random
+import secrets
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -84,7 +84,7 @@ def _ticket_license_ok(lic: dict, hardware_id: str) -> bool:
 def build_ticket(license_key: str, hardware_id: str, lic: dict,
                  sign_key: Ed25519PrivateKey, ttl_hours: int = TICKET_TTL_HOURS):
     """Construye y firma un ticket. Devuelve (ticket_payload, ticket_sig_b64)."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     payload = {
         "license_key":      license_key,
         "hardware_id":      hardware_id,
@@ -202,18 +202,59 @@ def _op_register_trial(db, _license_key, hardware_id, user_name, user_email):
         if len(existing) > 0:
             return {"success": False, "message": "Este equipo ya utilizó el período de prueba", "trial_key": None}
 
-    year = datetime.now().strftime("%Y")
-    trial_key = f"OMA-{year}-TRIAL-{''.join(random.choices(string.ascii_uppercase + string.digits, k=4))}"
     expiration = datetime.now() + timedelta(days=7)
-    db.collection(COLLECTION).document(trial_key).set({
+    datos = {
         "tipo": "trial", "hardware_id": hardware_id,
         "cliente_nombre": user_name or "", "cliente_email": user_email or "",
         "estado": "activo", "fecha_creacion": firestore.SERVER_TIMESTAMP,
         "fecha_expiracion": expiration, "fecha_activacion": firestore.SERVER_TIMESTAMP,
         "activada": True, "max_transferencias": 0, "transferencias_realizadas": 0,
         "ultima_sincronizacion": firestore.SERVER_TIMESTAMP,
-    })
+    }
+
+    trial_key = _crear_documento_trial(db, datos)
+    if trial_key is None:
+        return {"success": False,
+                "message": "No se pudo generar la clave de prueba, intente nuevamente",
+                "trial_key": None}
+
     return {"success": True, "message": f"Trial activado hasta {expiration.strftime('%Y-%m-%d')}", "trial_key": trial_key}
+
+
+def generate_trial_key() -> str:
+    """Clave de trial en el mismo formato que las licencias: XXXXX-XXXXX-…
+
+    El formato anterior era `OMA-{año}-TRIAL-` + 4 caracteres: solo 36^4 ≈ 1,7M
+    combinaciones sobre un prefijo predecible, y además no respetaba el formato
+    5×5 que valida el cliente (`core/license/license_validator.LICENSE_PATTERN`).
+
+    Se usa `secrets`, no `random`: esto es material de seguridad y el Mersenne
+    Twister de `random` es predecible a partir de salidas observadas.
+    """
+    alfabeto = string.ascii_uppercase + string.digits   # 36 símbolos
+    bloques = ["".join(secrets.choice(alfabeto) for _ in range(5)) for _ in range(5)]
+    return "-".join(bloques)
+
+
+def _crear_documento_trial(db, datos, intentos: int = 5):
+    """Crea el documento del trial con una clave única.
+
+    `document(key).set(...)` SOBRESCRIBE si el documento ya existe: con el
+    formato viejo, una colisión pisaba el trial de otro cliente en silencio.
+    Se usa `create()`, que falla si la clave ya está tomada, y se reintenta con
+    otra. Devuelve la clave usada, o None si no se consiguió una libre.
+    """
+    for _ in range(intentos):
+        clave = generate_trial_key()
+        try:
+            db.collection(COLLECTION).document(clave).create(datos)
+            return clave
+        except Exception as e:
+            # AlreadyExists → colisión (astronómicamente improbable con 36^25,
+            # pero create() es lo que hace que sea imposible pisar a otro).
+            if "already exists" not in str(e).lower():
+                raise
+    return None
 
 
 def _op_sync(db, license_key, _hw, _un, _ue):
@@ -264,7 +305,7 @@ def handle(body: dict, db, sign_key: Ed25519PrivateKey,
     # TIER1 #6: adjuntar ticket firmado si la licencia es válida para el hardware.
     _attach_ticket(body, result, sign_key)
 
-    result["_ts"] = datetime.utcnow().isoformat() + "Z"
+    result["_ts"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     result["_nonce"] = base64.b64encode(os.urandom(12)).decode("ascii")
     # Anti-replay: eco DENTRO del payload firmado del nonce que generó el
     # cliente para ESTA request. El cliente rechaza la respuesta si no coincide,
